@@ -1,0 +1,33 @@
+# config/pass_fail.yaml
+# Pass/Fail thresholds for different defect types
+
+pass_fail_thresholds:
+  # Default thresholds for unknown defect types
+  default:
+    confidence: 0.5
+    severity: 0.001  # 0.1% of image area
+
+  # Specific thresholds per defect type
+  edge_tear:
+    confidence: 0.6
+    severity: 0.0005  # More sensitive for edge tears
+
+  scratch:
+    confidence: 0.6
+    severity: 0.0005
+
+  surface_blob:
+    confidence: 0.5
+    severity: 0.0015  # Less sensitive for surface blobs
+
+  bubble:
+    confidence: 0.7
+    severity: 0.0008
+
+  ring_defect:
+    confidence: 0.7
+    severity: 0.0008
+
+  macro_defect:
+    confidence: 0.4
+    severity: 0.002  # Larger defects allowed before fail

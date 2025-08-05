@@ -1,0 +1,36 @@
+# config/pipeline_config.yaml
+# Main configuration for J&J Contact Lens Defect Detection Pipeline
+
+data:
+  root_dir: "/Project_Armor"
+  num_workers: 4
+  img_size: 1024
+  train_split: 0.8
+
+models:
+  registry_path: "model_zoo/registry.json"
+
+training:
+  batch_size: 4
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0005
+  lr_step_size: 10
+  patience: 10
+  save_period: 10
+
+eval:
+  iou_threshold: 0.5
+  pass_fail_config: "config/pass_fail.yaml"
+
+output:
+  dir: "outputs"
+
+# Logging configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/armor_{timestamp}.log"  # {timestamp} will be replaced with current date/time
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  performance_metrics: true  # Enable performance metrics tracking
+  metrics_output: "logs/metrics_{timestamp}.json"  # Output file for performance metrics

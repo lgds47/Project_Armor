@@ -1,0 +1,74 @@
+# Pass/Fail thresholds with J&J physical measurements
+# Based on J&J specification document
+
+pass_fail_thresholds:
+  # Pixel-based thresholds at 2048x2048 resolution
+  pixel_thresholds:
+    debris:
+      measure: longest_dimension
+      threshold_pixels: 5
+      mode: ">="
+
+    center-hole:
+      measure: longest_dimension
+      threshold_pixels: 5
+      mode: ">="
+
+    center-tear:
+      measure: longest_dimension
+      threshold_pixels: 5
+      mode: ">="
+
+    edge-tear:
+      measure: depth
+      threshold_pixels: 5
+      mode: ">="
+
+    edge-chip:
+      measure: depth
+      threshold_pixels: 5
+      mode: ">="
+
+    exterior-excess:
+      measure: depth
+      threshold_pixels: 5
+      mode: ">="
+
+  # Percentage-based thresholds
+  percentage_thresholds:
+    edge-out-of-focus:
+      measure: arc_length_percent
+      threshold: 30.0
+
+    edge-obstructed:
+      measure: arc_length_percent
+      threshold: 4.0
+
+    ripple:
+      measure: surface_percent
+      threshold: 50.0
+
+    bubble:
+      measure: area_percent
+      threshold: 4.0
+
+    123-mark-obstructed:
+      measure: dots_count
+      threshold: 3.0
+
+  # Always fail conditions
+  always_fail:
+    - edge-not-closed
+    - lens-folded
+    - lens-inverted
+    - missing-lens
+    - multiple-lenses
+    - lens-out-of-round
+    - bubble-scatter
+    - extra-lens
+
+# J&J lens specifications
+lens_specifications:
+  diameter_pixels: 1580.0
+  diameter_mm: 14.2
+  image_resolution: [2048, 2048]
