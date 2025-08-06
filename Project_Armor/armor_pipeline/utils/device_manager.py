@@ -75,21 +75,34 @@ class DeviceManager:
             usable_memory = max(0, available_memory - safety_margin)
             
             # Estimate memory per model (based on typical model sizes)
-            # Assuming each model requires approximately 2-4GB depending on size
-            base_model_memory = 3 * (1024**3)  # 3GB per model
+            # Model memory = base + batch_size * per_sample
+            base_model_memory = 2 * (1024**3)  # 2GB base per model
+            per_sample_memory = 0.5 * (1024**3)  # 0.5GB per batch item
             
             # Calculate total memory needed for ensemble
-            ensemble_memory = base_model_memory * num_models
+            ensemble_memory = num_models * base_model_memory  # Batch calc done below
             
             # Determine batch size based on available memory and ensemble size
             if usable_memory >= ensemble_memory:
-                # Enough memory for full ensemble with default batch sizes
+                # Calculate maximum batch size based on remaining memory and per-sample cost
+                remaining_memory = usable_memory - ensemble_memory
+                max_batch_size = int(remaining_memory / (num_models * per_sample_memory))
+                
+                # Cap batch size based on GPU capabilities and be more conservative for all GPUs
                 if total_memory >= 32 * (1024**3):  # High-end GPU (>=32GB)
-                    return torch.device('cuda'), 6
+                    # For high-end GPUs, use 1/3 of calculated max_batch_size, capped at 6
+                    # This is more conservative to account for model complexity
+                    batch_size = min(max(1, max_batch_size // 3), 6)
                 elif total_memory >= 16 * (1024**3):  # Mid-range GPU (>=16GB)
-                    return torch.device('cuda'), 4
+                    # For mid-range GPUs, use half of calculated max_batch_size, capped at 4
+                    batch_size = min(max(1, max_batch_size // 2), 4)
                 else:  # Low-end GPU (<16GB)
-                    return torch.device('cuda'), 2
+                    # For low-end GPUs, use half of calculated max_batch_size, capped at 2
+                    batch_size = min(max(1, max_batch_size // 2), 2)
+                
+                # Ensure minimum batch size of 1
+                batch_size = max(1, batch_size)
+                return torch.device('cuda'), batch_size
             elif usable_memory >= ensemble_memory / 2:
                 # Limited memory - reduce batch size
                 logger.warning(f"Limited GPU memory for {num_models} models, reducing batch size")

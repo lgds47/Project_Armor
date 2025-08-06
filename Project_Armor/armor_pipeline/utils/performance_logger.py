@@ -7,6 +7,7 @@ This module provides functionality for logging and monitoring performance metric
 import logging
 from datetime import datetime
 from pathlib import Path
+import threading
 import os
 import time
 import json
@@ -14,6 +15,7 @@ from typing import Dict, Any, Optional, Union, List
 
 class PerformanceLogger:
     """Logger for tracking performance metrics and general logging."""
+    _lock = threading.Lock()
     
     def __init__(self, log_dir: Path = Path("logs")):
         """
@@ -223,6 +225,7 @@ class PerformanceLogger:
         Returns:
             PerformanceLogger instance
         """
-        if not hasattr(PerformanceLogger, "_instance") or PerformanceLogger._instance is None:
-            PerformanceLogger._instance = PerformanceLogger(log_dir=log_dir or Path("logs"))
+        with PerformanceLogger._lock:
+            if not hasattr(PerformanceLogger, "_instance") or PerformanceLogger._instance is None:
+                PerformanceLogger._instance = PerformanceLogger(log_dir=log_dir or Path("logs"))
         return PerformanceLogger._instance

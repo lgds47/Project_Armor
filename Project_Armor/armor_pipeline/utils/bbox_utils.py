@@ -236,6 +236,9 @@ def validate_boxes(
     if boxes.size == 0:
         return boxes
     
+    # Work on copy to avoid unexpected mutations
+    boxes = boxes.copy() if isinstance(boxes, np.ndarray) else boxes.clone()
+    
     # Convert to xyxy for validation if needed
     if format == 'coco':
         boxes = convert_bbox_format(boxes, 'coco', 'xyxy')

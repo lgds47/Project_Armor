@@ -23,6 +23,7 @@ from armor_pipeline.utils.bbox_utils import convert_bbox_format
 def create_stratified_splits(data, test_size=0.2, val_size=0.1):
     """
     Create stratified train/val/test splits ensuring rare classes appear in all splits.
+    Ensures that annotations from the same lens (image) are kept together in the same split.
     
     Args:
         data: List of data samples (annotations)
@@ -35,34 +36,65 @@ def create_stratified_splits(data, test_size=0.2, val_size=0.1):
         Tuple of (train_data, val_data) if test_size = 0 and val_size > 0
         Tuple of (data, []) if both test_size = 0 and val_size = 0
     """
-    # Extract all labels
-    all_labels = []
-    label_matrix = []
+    # First, handle ultra-rare classes with oversampling
+    defect_counts = {}
+    for sample in data:
+        for defect in sample.defects:
+            defect_counts[defect.name] = defect_counts.get(defect.name, 0) + 1
     
+    # Oversample rare classes BEFORE splitting
+    min_samples = 20  # Minimum per class
+    augmented_data = list(data)
+    for defect_name, count in defect_counts.items():
+        if count < min_samples:
+            # Find all samples with this defect
+            rare_samples = [s for s in data if any(d.name == defect_name for d in s.defects)]
+            # Oversample to reach minimum
+            num_copies = (min_samples - count) // len(rare_samples) + 1
+            for _ in range(num_copies):
+                augmented_data.extend(rare_samples)
+    
+    data = augmented_data
+    
+    # Group annotations by lens (image) identifier
+    lens_groups = {}
     for i, sample in enumerate(data):
-        sample_labels = []
+        # Use image_path.stem as the lens identifier
+        lens_id = sample.image_path.stem
+        if lens_id not in lens_groups:
+            lens_groups[lens_id] = []
+        lens_groups[lens_id].append((i, sample))
+    
+    # Extract all labels at the lens level
+    all_labels = []
+    lens_label_matrix = []
+    
+    for lens_id, samples in lens_groups.items():
+        lens_labels = []
         
-        # Handle samples with no defects
-        if hasattr(sample, 'defects') and sample.defects:
-            for defect in sample.defects:
-                sample_labels.append(defect.name)
+        # Collect all defect labels from all annotations for this lens
+        for _, sample in samples:
+            if hasattr(sample, 'defects') and sample.defects:
+                for defect in sample.defects:
+                    lens_labels.append(defect.name)
         
-        # Create a binary label vector for this sample
-        unique_labels = list(set(sample_labels))
-        all_labels.extend(unique_labels)
+        # Create a binary label vector for this lens
+        unique_lens_labels = list(set(lens_labels))
+        all_labels.extend(unique_lens_labels)
         
         # We'll build the label matrix after getting all unique labels
-        label_matrix.append((i, unique_labels))
+        lens_label_matrix.append((lens_id, unique_lens_labels))
     
-    # Get unique labels across all samples
+    # Get unique labels across all lenses
     unique_labels = sorted(list(set(all_labels)))
     label_to_idx = {label: i for i, label in enumerate(unique_labels)}
     
-    # Build the multi-label matrix (samples x labels)
-    X = np.array(range(len(data))).reshape(-1, 1)
-    y = np.zeros((len(data), len(unique_labels)), dtype=int)
+    # Build the multi-label matrix (lenses x labels)
+    lens_ids = list(lens_groups.keys())
+    X = np.array(range(len(lens_ids))).reshape(-1, 1)
+    y = np.zeros((len(lens_ids), len(unique_labels)), dtype=int)
     
-    for i, labels in label_matrix:
+    for i, (lens_id, labels) in enumerate(lens_label_matrix):
         for label in labels:
             y[i, label_to_idx[label]] = 1
     
@@ -72,46 +104,58 @@ def create_stratified_splits(data, test_size=0.2, val_size=0.1):
             X, y, test_size=test_size
         )
         
-        # Convert back to indices
-        train_val_indices = train_val_idx.flatten()
-        test_indices = test_idx.flatten()
+        # Convert back to lens indices
+        train_val_lens_indices = train_val_idx.flatten()
+        test_lens_indices = test_idx.flatten()
         
-        # Create test set
-        test_data = [data[i] for i in test_indices]
+        # Get the lens IDs for each split
+        train_val_lens_ids = [lens_ids[i] for i in train_val_lens_indices]
+        test_lens_ids = [lens_ids[i] for i in test_lens_indices]
+        
+        # Create test set by collecting all annotations for test lenses
+        test_data = []
+        for lens_id in test_lens_ids:
+            for _, sample in lens_groups[lens_id]:
+                test_data.append(sample)
         
         # Second split: train vs val (if needed)
         if val_size > 0:
             # Adjust val_size relative to the train+val set
             relative_val_size = val_size / (1 - test_size)
             
-            # Get data for train+val
-            train_val_data = [data[i] for i in train_val_indices]
+            # Create a new lens groups dictionary for train+val lenses
+            train_val_lens_groups = {lens_id: lens_groups[lens_id] for lens_id in train_val_lens_ids}
             
-            # Extract labels for train+val set
-            train_val_labels = []
-            train_val_label_matrix = []
+            # Extract all labels at the lens level for train+val
+            train_val_all_labels = []
+            train_val_lens_label_matrix = []
             
-            for i, sample in enumerate(train_val_data):
-                sample_labels = []
+            for lens_id, samples in train_val_lens_groups.items():
+                lens_labels = []
                 
-                # Handle samples with no defects
-                if hasattr(sample, 'defects') and sample.defects:
-                    for defect in sample.defects:
-                        sample_labels.append(defect.name)
+                # Collect all defect labels from all annotations for this lens
+                for _, sample in samples:
+                    if hasattr(sample, 'defects') and sample.defects:
+                        for defect in sample.defects:
+                            lens_labels.append(defect.name)
                 
-                unique_labels = list(set(sample_labels))
-                train_val_labels.extend(unique_labels)
-                train_val_label_matrix.append((i, unique_labels))
+                # Create a binary label vector for this lens
+                unique_lens_labels = list(set(lens_labels))
+                train_val_all_labels.extend(unique_lens_labels)
+                
+                # We'll build the label matrix after getting all unique labels
+                train_val_lens_label_matrix.append((lens_id, unique_lens_labels))
             
-            # Get unique labels for train+val set
-            train_val_unique_labels = sorted(list(set(train_val_labels)))
+            # Get unique labels across all train+val lenses
+            train_val_unique_labels = sorted(list(set(train_val_all_labels)))
             train_val_label_to_idx = {label: i for i, label in enumerate(train_val_unique_labels)}
             
-            # Build the multi-label matrix for train+val
-            X_train_val = np.array(range(len(train_val_data))).reshape(-1, 1)
-            y_train_val_new = np.zeros((len(train_val_data), len(train_val_unique_labels)), dtype=int)
+            # Build the multi-label matrix for train+val lenses
+            train_val_lens_ids = list(train_val_lens_groups.keys())
+            X_train_val = np.array(range(len(train_val_lens_ids))).reshape(-1, 1)
+            y_train_val_new = np.zeros((len(train_val_lens_ids), len(train_val_unique_labels)), dtype=int)
             
-            for i, labels in train_val_label_matrix:
+            for i, (lens_id, labels) in enumerate(train_val_lens_label_matrix):
                 for label in labels:
                     if label in train_val_label_to_idx:
                         y_train_val_new[i, train_val_label_to_idx[label]] = 1
@@ -121,18 +165,32 @@ def create_stratified_splits(data, test_size=0.2, val_size=0.1):
                 X_train_val, y_train_val_new, test_size=relative_val_size
             )
             
-            # Convert back to indices
-            train_indices = train_idx.flatten()
-            val_indices = val_idx.flatten()
+            # Convert back to lens indices
+            train_lens_indices = train_idx.flatten()
+            val_lens_indices = val_idx.flatten()
             
-            # Create train and val sets
-            train_data = [train_val_data[i] for i in train_indices]
-            val_data = [train_val_data[i] for i in val_indices]
+            # Get the lens IDs for each split
+            train_lens_ids = [train_val_lens_ids[i] for i in train_lens_indices]
+            val_lens_ids = [train_val_lens_ids[i] for i in val_lens_indices]
+            
+            # Create train and val sets by collecting all annotations for each lens
+            train_data = []
+            for lens_id in train_lens_ids:
+                for _, sample in lens_groups[lens_id]:
+                    train_data.append(sample)
+                    
+            val_data = []
+            for lens_id in val_lens_ids:
+                for _, sample in lens_groups[lens_id]:
+                    val_data.append(sample)
             
             return train_data, val_data, test_data
         else:
             # No validation set needed
-            train_data = [data[i] for i in train_val_indices]
+            train_data = []
+            for lens_id in train_val_lens_ids:
+                for _, sample in lens_groups[lens_id]:
+                    train_data.append(sample)
             return train_data, test_data
     else:
         # No test set needed, just train/val split
@@ -141,13 +199,24 @@ def create_stratified_splits(data, test_size=0.2, val_size=0.1):
                 X, y, test_size=val_size
             )
             
-            # Convert back to indices
-            train_indices = train_idx.flatten()
-            val_indices = val_idx.flatten()
+            # Convert back to lens indices
+            train_lens_indices = train_idx.flatten()
+            val_lens_indices = val_idx.flatten()
             
-            # Create train and val sets
-            train_data = [data[i] for i in train_indices]
-            val_data = [data[i] for i in val_indices]
+            # Get the lens IDs for each split
+            train_lens_ids = [lens_ids[i] for i in train_lens_indices]
+            val_lens_ids = [lens_ids[i] for i in val_lens_indices]
+            
+            # Create train and val sets by collecting all annotations for each lens
+            train_data = []
+            for lens_id in train_lens_ids:
+                for _, sample in lens_groups[lens_id]:
+                    train_data.append(sample)
+                    
+            val_data = []
+            for lens_id in val_lens_ids:
+                for _, sample in lens_groups[lens_id]:
+                    val_data.append(sample)
             
             return train_data, val_data
         else:
@@ -192,6 +261,10 @@ class ContactLensDataset(Dataset):
             self.class_mapping = class_mapping
 
         self.num_classes = len(self.class_mapping) + 1  # +1 for background
+
+        # Validate if model expects different num_classes
+        if hasattr(self, 'expected_num_classes') and self.expected_num_classes != self.num_classes:
+            raise ValueError(f"Class mismatch: dataset has {self.num_classes} classes, model expects {self.expected_num_classes}")
 
         # Filter valid annotations (those with existing images)
         self.valid_annotations = [
@@ -346,16 +419,34 @@ class ContactLensDataset(Dataset):
         # Prepare targets
         bboxes = []
         labels = []
+        sample_weights = []
         masks = [] if self.use_polygons else None
 
         for defect in ann.defects:
-            # Get bbox from defect in either format
-            # defect.to_bbox() typically returns coordinates in (x1, y1, x2, y2) format
+            # Get bbox from defect - always returns (x1, y1, x2, y2) format
+            # per parser.py:94-113
             bbox = defect.to_bbox()
             
+            # Calculate tightness ratio for linear defects
+            if defect.defect_type == DefectType.POLYLINE:
+                polyline_area = self._calculate_polyline_area(defect.points, width=2)  # 2px width
+                bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                tightness = polyline_area / max(bbox_area, 1e-6)
+                
+                # Skip if bbox is >90% empty space (would confuse model)
+                if tightness < 0.1:
+                    continue
+                    
+            # For polygons, use actual polygon area vs bbox area as sample weight
+            sample_weight = 1.0
+            if defect.defect_type in [DefectType.POLYGON, DefectType.POLYLINE]:
+                actual_area = self._calculate_defect_area(defect)
+                bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                sample_weight = actual_area / max(bbox_area, 1e-6)  # Weight by fill ratio
+            
             try:
-                # Convert to COCO format (x, y, w, h) using the utility function
-                coco_bbox = convert_bbox_format(bbox, source_format=None, target_format='coco')
+                # Explicitly convert from xyxy to COCO format
+                coco_bbox = convert_bbox_format(bbox, source_format='xyxy', target_format='coco')
                 
                 # Extract coordinates for further processing
                 x1, y1, w, h = coco_bbox
@@ -376,6 +467,8 @@ class ContactLensDataset(Dataset):
                 bboxes.append([x1, y1, w, h])
                 # Add the label for this defect
                 labels.append(self.class_mapping.get(defect.name, 0))
+                # Add the sample weight
+                sample_weights.append(sample_weight)
                 
                 # Get polygon mask if needed
                 if self.use_polygons:
@@ -392,21 +485,25 @@ class ContactLensDataset(Dataset):
                     image=image,
                     bboxes=bboxes,
                     masks=masks,
-                    labels=labels
+                    labels=labels,
+                    sample_weights=sample_weights  # Include sample weights
                 )
                 image = transformed['image']
                 bboxes = transformed['bboxes']
                 masks = transformed['masks']
                 labels = transformed['labels']
+                sample_weights = transformed['sample_weights']
             else:
                 transformed = self.transform(
                     image=image,
                     bboxes=bboxes,
-                    labels=labels
+                    labels=labels,
+                    sample_weights=sample_weights  # Include sample weights
                 )
                 image = transformed['image']
                 bboxes = transformed['bboxes']
                 labels = transformed['labels']
+                sample_weights = transformed['sample_weights']
 
         # Convert to tensors
         if not isinstance(image, torch.Tensor):
@@ -438,7 +535,8 @@ class ContactLensDataset(Dataset):
             'image_id': torch.tensor([idx]),                        # Image identifier
             'area': torch.tensor(areas, dtype=torch.float32),       # Box areas for COCO metrics
             'iscrowd': torch.zeros(len(bboxes), dtype=torch.int64), # Crowd flag (0 for individual objects)
-            'image_path': str(ann.image_path)                       # Original image path for reference
+            'image_path': str(ann.image_path),                      # Original image path for reference
+            'sample_weights': torch.tensor(sample_weights, dtype=torch.float32)  # Use in loss function
         }
 
         if self.use_polygons and masks:
@@ -473,6 +571,60 @@ class ContactLensDataset(Dataset):
         cv2.fillPoly(mask, [pts], 1)
 
         return mask
+        
+    def _calculate_polyline_area(self, points: List[Point], width: int = 2) -> float:
+        """
+        Calculate the area of a polyline with a given width.
+        
+        Args:
+            points: List of points defining the polyline
+            width: Width of the polyline in pixels
+            
+        Returns:
+            Area of the polyline in pixels
+        """
+        # Create a mask with the same size as a typical image
+        mask = np.zeros((2048, 2048), dtype=np.uint8)
+        
+        # Convert points to numpy array
+        pts = np.array([(p.x, p.y) for p in points], dtype=np.int32)
+        
+        # Draw the polyline with the specified width
+        cv2.polylines(mask, [pts], False, 1, thickness=width)
+        
+        # Count non-zero pixels
+        return float(np.count_nonzero(mask))
+    
+    def _calculate_defect_area(self, defect: Defect) -> float:
+        """
+        Calculate the area of any defect type.
+        
+        Args:
+            defect: Defect object
+            
+        Returns:
+            Area of the defect in pixels
+        """
+        if defect.defect_type == DefectType.POLYLINE:
+            # For polylines, calculate area with a width of 2 pixels
+            return self._calculate_polyline_area(defect.points, width=2)
+        
+        elif defect.defect_type == DefectType.POLYGON:
+            # For polygons, create a mask and count non-zero pixels
+            mask = self._create_mask(defect, (2048, 2048))
+            return float(np.count_nonzero(mask))
+        
+        elif defect.defect_type == DefectType.ELLIPSE:
+            # For ellipses, calculate area using the formula: π * rx * ry
+            return np.pi * defect.rx * defect.ry
+        
+        elif defect.defect_type == DefectType.BBOX:
+            # For bboxes, calculate area as width * height
+            return (defect.x_max - defect.x_min) * (defect.y_max - defect.y_min)
+        
+        # Default fallback: calculate bbox area
+        bbox = defect.to_bbox()
+        return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
 
         
     def get_class_names(self) -> List[str]:
@@ -489,15 +641,18 @@ def get_transform(mode: str = "train", img_size: int = 1024) -> A.Compose:
     if mode == "train":
         transform = A.Compose([
             A.Resize(img_size, img_size),
-            A.RandomBrightnessContrast(p=0.2),
-            A.RandomGamma(p=0.2),
+            # Photometric augmentations OK for grayscale
+            A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3),
+            A.RandomGamma(gamma_limit=(90, 110), p=0.2),
+            # Geometric augmentations that preserve measurements
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
-            A.Rotate(limit=90, p=0.5),
+            # NO rotation - changes defect measurements!
+            # NO scaling - changes pixel sizes!
             A.OneOf([
                 A.GaussNoise(p=1),
-                A.GaussianBlur(p=1),
-                A.MotionBlur(p=1),
+                A.GaussianBlur(blur_limit=3, p=1),  # Mild blur only
+                # NO MotionBlur - creates artificial linear defects
             ], p=0.2),
             A.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -506,7 +661,7 @@ def get_transform(mode: str = "train", img_size: int = 1024) -> A.Compose:
             ToTensorV2()
         ], bbox_params=A.BboxParams(
             format='coco',
-            label_fields=['labels'],
+            label_fields=['labels', 'sample_weights'],
             min_visibility=0.3
         ))
     else:
@@ -519,7 +674,7 @@ def get_transform(mode: str = "train", img_size: int = 1024) -> A.Compose:
             ToTensorV2()
         ], bbox_params=A.BboxParams(
             format='coco',
-            label_fields=['labels']
+            label_fields=['labels', 'sample_weights']
         ))
 
     return transform

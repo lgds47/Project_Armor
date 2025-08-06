@@ -128,46 +128,25 @@ class JJAwareLoss(nn.Module):
 
     def _threshold_aware_regression(self, pred_boxes: torch.Tensor,
                                   targets: List[Dict]) -> torch.Tensor:
-        """Asymmetric loss around J&J pixel thresholds"""
+        """Focus on getting the critical 5-pixel threshold correct"""
         if len(pred_boxes) == 0:
             return torch.tensor(0.0, device=self.device)
-
+        
+        # Convert to physical measurements
         total_loss = 0.0
         for pred, target in zip(pred_boxes, targets):
             gt_boxes = target['boxes']
-
-            # Compute sizes
-            pred_sizes = torch.max(pred[:, 2:] - pred[:, :2], dim=1)[0]
-            gt_sizes = torch.max(gt_boxes[:, 2:] - gt_boxes[:, :2], dim=1)[0]
-
-            # Asymmetric penalties
-            errors = pred_sizes - gt_sizes
-
-            # Critical: False accepts (missing defects > 5px)
-            false_accept = (gt_sizes > self.pixel_threshold) & (pred_sizes < self.pixel_threshold)
-
-            # Bad but not critical: False rejects
-            false_reject = (gt_sizes < self.pixel_threshold) & (pred_sizes > self.pixel_threshold)
-
-            # Near threshold: Both within 4-6 pixels
-            near_threshold = (torch.abs(gt_sizes - self.pixel_threshold) < 1) | \
-                           (torch.abs(pred_sizes - self.pixel_threshold) < 1)
-
-            loss = torch.where(
-                false_accept,
-                self.always_fail_weight * errors**2,
-                torch.where(
-                    false_reject,
-                    2.0 * errors**2,
-                    torch.where(
-                        near_threshold,
-                        self.near_threshold_weight * errors**2,
-                        errors**2
-                    )
-                )
-            )
-
-            total_loss += loss.mean()
+            
+            # Calculate longest dimension (J&J metric for center defects)
+            pred_longest = torch.max(pred[:, 2:] - pred[:, :2], dim=1)[0]
+            gt_longest = torch.max(gt_boxes[:, 2:] - gt_boxes[:, :2], dim=1)[0]
+            
+            # Binary classification loss: above or below 5px threshold
+            pred_fail = (pred_longest > self.pixel_threshold).float()
+            gt_fail = (gt_longest > self.pixel_threshold).float()
+            threshold_loss = F.binary_cross_entropy(pred_fail, gt_fail)
+            
+            total_loss += threshold_loss * 10.0  # High weight for threshold accuracy
 
         return total_loss
 
@@ -833,7 +812,7 @@ class MicroDefectSpecialist(BaseDetector):
 
         return AnchorGenerator(anchor_sizes, aspect_ratios)
 
-    def train_step(self, images: torch.Tensor, targets: List[Dict]) -> Dict[str, float]:
+    def train_step(self, images: torch.Tensor, targets: List[Dict]) -> Dict[str, torch.Tensor]:
         """Training step with J&J aware loss"""
         self.model.train()
 
@@ -854,11 +833,7 @@ class MicroDefectSpecialist(BaseDetector):
             for key, value in jj_losses.items():
                 detection_losses[key] = value
 
-        # Total loss
-        losses = sum(loss for loss in detection_losses.values())
-        losses.backward()
-
-        return {k: v.item() for k, v in detection_losses.items()}
+        return detection_losses
 
     def predict(self, images: torch.Tensor) -> List[Dict]:
         """Inference with micro-defect optimizations"""
@@ -917,13 +892,24 @@ class YOLOv8MicroDefect(BaseDetector):
 
     def build_model(self):
         """Build YOLOv8 with J&J modifications"""
-        # Start with YOLOv8 large for better small object detection
-        model_name = 'yolov8l.pt' if 'yolov8l' in self.config.backbone else 'yolov8m.pt'
-
+        # Use nano model with custom head for micro defects
+        model_name = 'yolov8n.pt'  # Less downsampling
+        
         if self.config.checkpoint_path:
             self.model = YOLO(self.config.checkpoint_path)
         else:
             self.model = YOLO(model_name)
+            
+        # Modify architecture for small objects
+        if hasattr(self.model.model, 'model'):
+            # Add P2 detection head (8x downsampling instead of 32x)
+            self.model.model.model[-1].stride = [8, 16, 32]  # Default is [8, 16, 32]
+            # Increase anchor sizes for micro defects
+            self.model.model.model[-1].anchors = torch.tensor([
+                [2,3, 3,5, 5,8],      # P3/8 - tiny anchors for 5-20px defects
+                [8,12, 12,20, 20,35],  # P4/16
+                [35,50, 50,80, 80,150] # P5/32
+            ])
 
         # Modify for grayscale input
         if hasattr(self.model.model, 'model') and hasattr(self.model.model.model, '0'):
@@ -981,9 +967,11 @@ class YOLOv8MicroDefect(BaseDetector):
         """YOLOv8 inference optimized for micro defects"""
         # Convert torch tensor to numpy if needed
         if isinstance(images, torch.Tensor):
-            # Handle grayscale conversion
-            if images.shape[1] == 1:  # [B, 1, H, W]
-                images = images.repeat(1, 3, 1, 1)  # Convert to pseudo-RGB
+            # Ensure grayscale input
+            if images.shape[1] == 3:  # [B, 3, H, W] 
+                images = images.mean(dim=1, keepdim=True)  # Convert to grayscale
+            # YOLOv8 expects 3-channel, so repeat grayscale
+            images = images.repeat(1, 3, 1, 1) if images.shape[1] == 1 else images
 
             # Denormalize
             mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -1112,7 +1100,7 @@ class FasterRCNNDetector(BaseDetector):
 
         return AnchorGenerator(anchor_sizes, aspect_ratios)
 
-    def train_step(self, images: torch.Tensor, targets: List[Dict]) -> Dict[str, float]:
+    def train_step(self, images: torch.Tensor, targets: List[Dict]) -> Dict[str, torch.Tensor]:
         """Single training step with J&J aware loss"""
         from armor_pipeline.utils.bbox_utils import convert_bbox_format
         
@@ -1150,17 +1138,7 @@ class FasterRCNNDetector(BaseDetector):
             for key, value in jj_losses.items():
                 loss_dict[f'jj_{key}'] = value * 0.5  # Weight appropriately
 
-        # Calculate total loss
-        losses = sum(loss for loss in loss_dict.values())
-
-        # Extract individual losses for logging
-        loss_values = {key: loss.item() for key, loss in loss_dict.items()}
-        loss_values['loss_total'] = losses.item()
-
-        # Backward pass
-        losses.backward()
-
-        return loss_values
+        return loss_dict
 
     def predict(self, images: torch.Tensor) -> List[Dict]:
         """Run Faster R-CNN inference with J&J optimizations"""
@@ -1228,6 +1206,7 @@ class ModelRegistry:
         self.registry_path = Path(registry_path)
         self.registry = self._load_registry()
         self._ensemble_cache = {}
+        self._max_cache_size = 10  # Limit cache size
 
     def _load_registry(self) -> Dict[str, ModelConfig]:
         """Load model registry from JSON/YAML"""
@@ -1383,6 +1362,10 @@ class ModelRegistry:
         """Get ensemble of specialized models"""
         if ensemble_name in self._ensemble_cache:
             return self._ensemble_cache[ensemble_name]
+
+        # Evict oldest if cache full
+        if len(self._ensemble_cache) >= self._max_cache_size:
+            self._ensemble_cache.pop(next(iter(self._ensemble_cache)))
 
         # Define ensemble compositions
         ensemble_configs = {

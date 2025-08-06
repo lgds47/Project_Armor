@@ -5,6 +5,7 @@ Provides train/eval/infer commands with plug-and-play model support
 
 import argparse
 import torch
+import numpy as np
 from pathlib import Path
 import yaml
 import json
@@ -44,6 +45,7 @@ class ArmorPipeline:
         # Setup paths
         data_root = self.config['data'].get('root_dir')
         self.project_config = get_project_config(base_path=Path(data_root) if data_root else None)
+        self.data_root = Path(data_root) if data_root else Path('.')
         self.output_dir = Path(self.config['output']['dir'])
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -54,6 +56,18 @@ class ArmorPipeline:
         
         # Initialize checkpoint manager
         self.checkpoint_manager = CheckpointManager(base_dir=self.output_dir / "checkpoints")
+        
+        # Set random seeds for reproducibility
+        self._set_random_seeds(self.config.get('random_seed', 42))
+    
+    def _set_random_seeds(self, seed: int):
+        """Set random seeds for reproducibility"""
+        import random
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         
     def validate_pipeline_config(self) -> Dict[str, Any]:
         """
@@ -809,14 +823,13 @@ class ArmorPipeline:
                 
                 # Reduce batch size and try again if possible
                 if adjusted_batch_size > 1:
+                    # Clear CUDA cache BEFORE retry
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     new_batch_size = max(1, adjusted_batch_size // 2)
                     logger.info(f"Reducing batch size from {adjusted_batch_size} to {new_batch_size} and retrying")
                     print(f"\nReducing batch size to {new_batch_size} and retrying...")
                     self.config['training']['batch_size'] = new_batch_size
-                    
-                    # Clear CUDA cache
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
                     
                     # Retry training with reduced batch size
                     if model.config.model_type == 'yolov8':
@@ -1091,6 +1104,9 @@ class ArmorPipeline:
             gamma=0.1
         )
 
+        # Initialize AMP scaler for mixed precision training
+        scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+
         best_map = 0
         patience_counter = 0
         patience = self.config['training'].get('patience', 10)
@@ -1145,12 +1161,24 @@ class ArmorPipeline:
                     # Zero gradients
                     optimizer.zero_grad()
 
-                    # Forward and backward pass
-                    losses = model.train_step(images, targets)
+                    # Forward and backward pass with AMP
+                    with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                        loss_dict = model.train_step(images, targets)
+                        
+                        # Calculate total loss for backward pass
+                        total_loss = sum(loss for loss in loss_dict.values())
+                    
+                    # Scale loss and backward
+                    scaler.scale(total_loss).backward()
+                    
+                    # Convert loss tensors to values for logging
+                    losses = {k: v.item() for k, v in loss_dict.items()}
+                    losses['loss_total'] = total_loss.item()
                     train_losses.append(losses['loss_total'])
 
-                    # Update weights
-                    optimizer.step()
+                    # Update weights with scaler
+                    scaler.step(optimizer)
+                    scaler.update()
 
                     # Update progress bar
                     pbar.set_postfix({'loss': f"{losses['loss_total']:.4f}"})

@@ -201,6 +201,62 @@ class DefectEvaluator:
         if not ap_per_class:
             return 0.0
         return np.mean(list(ap_per_class.values()))
+        
+    def compute_jj_metrics(self) -> Dict[str, float]:
+        """Compute J&J-specific metrics beyond standard mAP"""
+        metrics = {}
+        
+        # 1. Threshold accuracy: % of defects correctly classified as pass/fail at 5px
+        threshold_correct = 0
+        threshold_total = 0
+        
+        for pred, gt in zip(self.predictions, self.ground_truths):
+            pred_sizes = torch.max(pred['boxes'][:, 2:] - pred['boxes'][:, :2], dim=1)[0]
+            gt_sizes = torch.max(gt['boxes'][:, 2:] - gt['boxes'][:, :2], dim=1)[0]
+            
+            pred_fail = (pred_sizes > 5.0)
+            gt_fail = (gt_sizes > 5.0)
+            threshold_correct += (pred_fail == gt_fail).sum().item()
+            threshold_total += len(gt_fail)
+        
+        metrics['threshold_accuracy'] = threshold_correct / max(threshold_total, 1)
+        
+        # 2. Critical defect recall (must be 100% for always-fail defects)
+        critical_labels = [10, 11, 12, 13]  # folded, inverted, missing, multiple
+        
+        # Count critical defects in ground truth
+        critical_gt_total = 0
+        critical_detected = 0
+        
+        for pred, gt in zip(self.predictions, self.ground_truths):
+            gt_labels = gt['labels'].cpu()
+            gt_critical_mask = torch.tensor([label.item() in critical_labels for label in gt_labels], dtype=torch.bool)
+            critical_gt_total += gt_critical_mask.sum().item()
+            
+            if gt_critical_mask.sum().item() > 0:
+                # For each critical GT defect, check if it was detected
+                gt_boxes_critical = gt['boxes'][gt_critical_mask]
+                
+                for gt_box in gt_boxes_critical:
+                    # Find best matching prediction
+                    best_iou = 0
+                    best_pred_idx = -1
+                    
+                    for i, pred_box in enumerate(pred['boxes']):
+                        iou = self._compute_iou(gt_box.cpu().numpy(), pred_box.cpu().numpy())
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_pred_idx = i
+                    
+                    # If IoU > threshold and label is correct, count as detected
+                    if best_pred_idx >= 0 and best_iou >= self.iou_threshold:
+                        pred_label = pred['labels'][best_pred_idx].item()
+                        if pred_label in critical_labels:
+                            critical_detected += 1
+        
+        metrics['critical_recall'] = critical_detected / max(critical_gt_total, 1)
+        
+        return metrics
 
     def compute_confusion_matrix(self) -> Tuple[np.ndarray, pd.DataFrame]:
         """Compute confusion matrix for detection"""
@@ -350,6 +406,7 @@ class DefectEvaluator:
         # Compute all metrics
         ap_per_class = self.compute_ap_per_class()
         mAP = self.compute_map()
+        jj_metrics = self.compute_jj_metrics()
 
         # Generate visualizations and reports
         cm_df = self.plot_confusion_matrix(output_dir)
@@ -359,6 +416,7 @@ class DefectEvaluator:
         report = {
             'mAP': mAP,
             'AP_per_class': ap_per_class,
+            'jj_metrics': jj_metrics,
             'total_images': len(self.image_paths),
             'pass_rate': (pass_fail_df['PASS_FAIL'] == 'PASS').mean(),
             'fail_rate': (pass_fail_df['PASS_FAIL'] == 'FAIL').mean(),
@@ -377,6 +435,17 @@ class DefectEvaluator:
         print(f"Mean Average Precision (mAP): {mAP:.4f}")
         print(f"Target mAP: ≥ 0.90")
         print(f"Status: {'✓ PASS' if mAP >= 0.90 else '✗ FAIL'}")
+        
+        # Print J&J-specific metrics
+        print("\nJ&J-SPECIFIC METRICS")
+        print(f"Threshold Accuracy (5px): {jj_metrics['threshold_accuracy']:.4f}")
+        print(f"Target Threshold Accuracy: ≥ 0.95")
+        print(f"Status: {'✓ PASS' if jj_metrics['threshold_accuracy'] >= 0.95 else '✗ FAIL'}")
+        
+        print(f"Critical Defect Recall: {jj_metrics['critical_recall']:.4f}")
+        print(f"Target Critical Recall: 1.00")
+        print(f"Status: {'✓ PASS' if jj_metrics['critical_recall'] >= 0.99 else '✗ FAIL'}")
+        
         print(f"\nPer-class AP:")
         for class_name, ap in ap_per_class.items():
             print(f"  {class_name}: {ap:.4f}")

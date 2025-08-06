@@ -49,7 +49,30 @@ Project_Armor/
 
 ## Installation
 
-### Local Development
+### Quick Setup
+
+For a quick and reliable setup, use the provided setup script:
+
+```bash
+# Make the script executable
+chmod +x setup_environment.sh
+
+# Run the setup script
+./setup_environment.sh
+```
+
+This script will:
+1. Check for Python 3.11
+2. Create a virtual environment
+3. Install PyTorch with appropriate CUDA support
+4. Install all required dependencies
+5. Verify the installation
+
+For detailed instructions and troubleshooting, see the [Environment Setup Guide](docs/environment_setup.md).
+
+### Manual Setup
+
+If you prefer to set up the environment manually:
 
 ```bash
 # Clone the repository
@@ -58,11 +81,14 @@ cd Project_Armor
 
 # Create virtual environment
 python3.11 -m venv venv
-source venv/bin/activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
+# Install PyTorch with CUDA support
 pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
+
+# Install other dependencies
 pip install -r requirements.txt
+pip install scikit-multilearn>=0.2.0
 
 # Install package in development mode
 pip install -e .
