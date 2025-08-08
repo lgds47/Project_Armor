@@ -43,6 +43,9 @@ class DefectEvaluator:
 
         # Initialize metrics storage
         self.reset()
+        
+        # Buffer to optionally store per-iteration metrics for live dashboards
+        self.metrics_buffer: List[Dict[str, Any]] = []
 
     def _load_pass_fail_config(self, config_path: Path) -> Dict[str, Dict[str, float]]:
         """Load pass/fail configuration from YAML"""
@@ -389,14 +392,55 @@ class DefectEvaluator:
         plt.tight_layout()
 
         # Save figure
-        output_path = output_dir / f"confusion_matrix_{timestamp}.png"
-        plt.savefig(output_path, dpi=150)
+        fig_path = output_dir / f"confusion_matrix_{timestamp}.png"
+        plt.savefig(fig_path, dpi=150)
         plt.close()
 
         # Also save numeric CSV
-        cm_df.to_csv(output_dir / f"confusion_matrix_{timestamp}.csv")
+        csv_path = output_dir / f"confusion_matrix_{timestamp}.csv"
+        cm_df.to_csv(csv_path)
 
         return cm_df
+
+    def export_defect_instances(self, output_dir: Path) -> Optional[Path]:
+        """Export predicted defect instances with size stats for distribution analysis.
+        Returns path to CSV or None if no predictions.
+        """
+        output_dir = Path(output_dir)
+        rows = []
+        for img_path, pred in zip(self.image_paths, self.predictions):
+            image_id = Path(img_path).stem
+            boxes = pred.get('boxes')
+            scores = pred.get('scores')
+            labels = pred.get('labels')
+            if boxes is None or scores is None or labels is None:
+                continue
+            # Ensure tensors on CPU
+            boxes_np = boxes.detach().cpu().numpy() if hasattr(boxes, 'detach') else np.array(boxes)
+            scores_np = scores.detach().cpu().numpy() if hasattr(scores, 'detach') else np.array(scores)
+            labels_np = labels.detach().cpu().numpy() if hasattr(labels, 'detach') else np.array(labels)
+            for box, score, label in zip(boxes_np, scores_np, labels_np):
+                x1, y1, x2, y2 = box.tolist()
+                w = max(0.0, float(x2 - x1))
+                h = max(0.0, float(y2 - y1))
+                area = w * h
+                class_idx = int(label)
+                class_name = self.class_names[class_idx] if 0 <= class_idx < len(self.class_names) else str(class_idx)
+                rows.append({
+                    'image_id': image_id,
+                    'class_idx': class_idx,
+                    'class_name': class_name,
+                    'score': float(score),
+                    'x1': float(x1), 'y1': float(y1), 'x2': float(x2), 'y2': float(y2),
+                    'width': w, 'height': h, 'area': area,
+                })
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path = output_dir / f'defect_instances_{timestamp}.csv'
+        df.to_csv(out_path, index=False)
+        return out_path
 
     def generate_full_report(self, output_dir: Path) -> Dict[str, Any]:
         """Generate comprehensive evaluation report"""
@@ -411,6 +455,7 @@ class DefectEvaluator:
         # Generate visualizations and reports
         cm_df = self.plot_confusion_matrix(output_dir)
         pass_fail_df = self.generate_pass_fail_report(output_dir)
+        defects_csv_path = self.export_defect_instances(output_dir)
 
         # Create summary report
         report = {
@@ -420,7 +465,12 @@ class DefectEvaluator:
             'total_images': len(self.image_paths),
             'pass_rate': (pass_fail_df['PASS_FAIL'] == 'PASS').mean(),
             'fail_rate': (pass_fail_df['PASS_FAIL'] == 'FAIL').mean(),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'artifacts': {
+                'confusion_matrix_csv': str(output_dir / f"confusion_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
+                'pass_fail_csv': str(output_dir / f"pass_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
+                'defect_instances_csv': str(defects_csv_path) if defects_csv_path else None,
+            }
         }
 
         # Save summary

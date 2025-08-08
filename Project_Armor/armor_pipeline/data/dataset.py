@@ -18,6 +18,7 @@ from skmultilearn.model_selection import iterative_train_test_split
 
 from armor_pipeline.data.parser import Annotation, Defect, DefectType
 from armor_pipeline.utils.bbox_utils import convert_bbox_format
+from armor_pipeline.data.s3_image_loader import S3ImageLoader
 
 
 def create_stratified_splits(data, test_size=0.2, val_size=0.1):
@@ -235,7 +236,8 @@ class ContactLensDataset(Dataset):
         use_polygons: bool = False,
         class_mapping: Optional[Dict[str, int]] = None,
         mapping_file: Optional[Path] = None,
-        allow_new_classes: bool = False
+        allow_new_classes: bool = False,
+        use_s3: bool = False  # New parameter to enable S3 loading
     ):
         """
         Args:
@@ -246,6 +248,7 @@ class ContactLensDataset(Dataset):
             class_mapping: Dict mapping defect names to class IDs
             mapping_file: Path to JSON file for saving/loading class mapping
             allow_new_classes: If True, allow new classes not in existing mapping
+            use_s3: If True, enables loading images from S3
         """
         self.annotations = annotations
         self.transform = transform
@@ -253,6 +256,11 @@ class ContactLensDataset(Dataset):
         self.use_polygons = use_polygons
         self.mapping_file = mapping_file
         self.allow_new_classes = allow_new_classes
+        
+        # Initialize S3 image loader if needed
+        self.use_s3 = use_s3
+        if self.use_s3:
+            self.s3_loader = S3ImageLoader()
 
         # Build class mapping if not provided
         if class_mapping is None:
@@ -546,10 +554,18 @@ class ContactLensDataset(Dataset):
 
     def _load_image(self, image_path: Path) -> np.ndarray:
         """Load and preprocess image"""
-        # Load image
-        image = cv2.imread(str(image_path))
-        if image is None:
-            raise ValueError(f"Failed to load image: {image_path}")
+        # Check if we should use S3 loader
+        if self.use_s3 and str(image_path).startswith('s3://'):
+            # Extract S3 key from path (remove s3:// prefix)
+            s3_key = str(image_path)[5:]
+            image = self.s3_loader.load_image(s3_key)
+            if image is None:
+                raise ValueError(f"Failed to load image from S3: {image_path}")
+        else:
+            # Load image from local filesystem
+            image = cv2.imread(str(image_path))
+            if image is None:
+                raise ValueError(f"Failed to load image: {image_path}")
 
         # Convert BGR to RGB
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: armor-pipeline
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: armor-pipeline
+  template:
+    metadata:
+      labels:
+        app: armor-pipeline
+    spec:
+      containers:
+      - name: armor-pipeline
+        image: jnj-lens-defect:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            memory: "188Gi"
+            cpu: "96"
+          requests:
+            nvidia.com/gpu: "1"
+            memory: "140Gi"
+            cpu: "48"
+        env:
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: READINESS_READY
+          value: "true"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        command: ["python3.11", "-m", "armor_pipeline.cli", "serve-health", "--port", "8080"]

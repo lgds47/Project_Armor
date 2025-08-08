@@ -1502,6 +1502,10 @@ def main():
     infer_parser.add_argument('--image', type=Path, required=True, help='Path to image')
     infer_parser.add_argument('--checkpoint', type=Path, help='Path to model checkpoint')
 
+    # Health server command
+    health_parser = subparsers.add_parser('serve-health', help='Start lightweight health server on port 8080')
+    health_parser.add_argument('--port', type=int, default=8080, help='Port to serve health endpoints on')
+
     args = parser.parse_args()
 
     # Initialize pipeline
@@ -1517,6 +1521,12 @@ def main():
     elif args.command == 'infer':
         predictions = pipeline.infer(args.model, args.image, args.checkpoint)
         print(f"\nDetected {len(predictions['boxes'])} defects")
+
+    elif args.command == 'serve-health':
+        from armor_pipeline.utils.health_server import serve
+        port = getattr(args, 'port', 8080)
+        print(f"Starting health server on port {port}...")
+        serve(port=port)
 
     else:
         parser.print_help()

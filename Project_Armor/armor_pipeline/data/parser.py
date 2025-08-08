@@ -11,6 +11,8 @@ import numpy as np
 from enum import Enum
 import json
 import logging
+from armor_pipeline.data.s3_image_loader import S3ImageLoader
+from armor_pipeline.data.defect_taxonomy import JJDefectTaxonomy
 
 
 class DefectType(Enum):
@@ -342,7 +344,9 @@ class XMLAnnotationParser:
             return None
 
         obj_type = type_elem.text.lower()
-        obj_name = name_elem.text if name_elem is not None else "unknown"
+        raw_name = name_elem.text if name_elem is not None else "unknown"
+        # Normalize defect name using JJDefectTaxonomy
+        obj_name = JJDefectTaxonomy.normalize_defect_name(raw_name)
 
         # Skip unsupported types
         if obj_type not in self.SUPPORTED_TYPES:
@@ -617,4 +621,82 @@ def parse_all_annotations(
     if parsing_stats["images_not_found"] > 0:
         logger.warning(f"{parsing_stats['images_not_found']} annotations have missing image files")
     
+    return annotations
+
+
+def parse_merged_annotations_with_s3(
+    xml_path: Path,  # Your local merged_annotations_MINUS-TAM07-Q3-20250509.xml
+    s3_loader: S3ImageLoader,
+    crop_to_upper_half: bool = True
+) -> List[Annotation]:
+    """
+    Parse a merged XML annotation file and match annotations with images stored in S3.
+    
+    This function:
+    1. Parses the merged XML file
+    2. Gets a list of S3 images from the S3 loader
+    3. Creates a mapping of image names to S3 keys
+    4. Creates annotations with S3 paths for matching images
+    5. Parses defects for each annotation
+    
+    Args:
+        xml_path: Path to the local merged XML annotation file
+        s3_loader: Instance of S3ImageLoader to access S3 images
+        crop_to_upper_half: Whether to crop defects to upper half of image (default: True)
+        
+    Returns:
+        List of Annotation objects with S3 paths
+        
+    Example:
+        ```python
+        from armor_pipeline.data.parser import parse_merged_annotations_with_s3
+        from armor_pipeline.data.s3_image_loader import S3ImageLoader
+        from pathlib import Path
+        
+        # Initialize S3 loader
+        s3_loader = S3ImageLoader()
+        
+        # Parse merged XML file
+        xml_path = Path("merged_annotations.xml")
+        annotations = parse_merged_annotations_with_s3(xml_path, s3_loader)
+        
+        # Use annotations with S3 paths
+        for ann in annotations:
+            print(f"Image: {ann.image_path}, Defects: {len(ann.defects)}")
+        ```
+    """
+    
+    parser = XMLAnnotationParser(crop_to_upper_half)
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    
+    annotations = []
+    s3_images = s3_loader.get_image_list()
+    
+    # Create mapping of image names to S3 keys
+    image_map = {Path(s3_key).name: s3_key for s3_key in s3_images}
+    
+    # Parse each annotation
+    for ann_elem in root.findall('.//annotation'):
+        image_name = ann_elem.find('.//filename').text
+        
+        if image_name in image_map:
+            s3_key = image_map[image_name]
+            
+            # Create annotation with S3 path
+            annotation = Annotation(
+                image_path=Path(s3_key),  # Store S3 key as path
+                defects=[]
+            )
+            
+            # Parse defects
+            for obj in ann_elem.findall('.//object'):
+                defect = parser._parse_object(obj)
+                if defect and parser._is_in_upper_half(defect):
+                    annotation.defects.append(defect)
+            
+            annotations.append(annotation)
+    
+    logger = logging.getLogger("armor_pipeline.parser")
+    logger.info(f"Parsed {len(annotations)} annotations from merged XML")
     return annotations

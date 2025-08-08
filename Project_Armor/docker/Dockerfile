@@ -1,5 +1,5 @@
 # Dockerfile for J&J Contact Lens Defect Detection
-# Optimized for Nebius Cloud GPU instances (A100)
+# Optimized for NVIDIA Hopper (H200) but compatible with A100
 
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
@@ -7,7 +7,12 @@ FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=0
-ENV TORCH_CUDA_ARCH_LIST="8.0"
+# Hopper (H100/H200) compute capability is 9.0
+ENV TORCH_CUDA_ARCH_LIST="9.0"
+# NCCL/communication tuning for multi-GPU or distributed runs
+ENV NCCL_DEBUG=INFO
+ENV NCCL_IB_DISABLE=1
+ENV NCCL_P2P_DISABLE=0
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -41,6 +46,10 @@ RUN pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.py
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# Optional: install NVIDIA Transformer Engine for FP8 training on H200
+# If installation fails due to compatibility, continue without failing the build
+RUN pip install --no-cache-dir transformer-engine || true
+
 # Copy application code
 COPY armor_pipeline/ /app/armor_pipeline/
 COPY config/ /app/config/
@@ -56,6 +65,9 @@ RUN mkdir -p /app/data \
 
 # Set Python path
 ENV PYTHONPATH=/app:$PYTHONPATH
+
+# Expose health port for Kubernetes probes
+EXPOSE 8080
 
 # Create entrypoint script
 RUN echo '#!/bin/bash\n\

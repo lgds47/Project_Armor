@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: armor-pipeline-config
+  labels:
+    app: armor-pipeline
+data:
+  # Example runtime configuration values (override via env if needed)
+  LOG_LEVEL: "INFO"
+  READINESS_READY: "true"
