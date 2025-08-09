@@ -314,7 +314,7 @@ python -c "from armor_pipeline.models.registry import ModelRegistry; mr = ModelR
    docker push nebius.cr.cloud/jnj-lens-qc:v1.0
    ```
 
-3. **Deploy to Nebius**:
+3. **Deploy**:
    ```bash
    # Deploy on Nebius GPU instance
    docker run --gpus all \
